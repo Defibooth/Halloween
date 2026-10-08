@@ -21,8 +21,6 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Creepster&family=Montserrat:wght@400;600;700&family=Playfair+Display:ital,wght@0,600;0,700;1,400&display=swap" rel="stylesheet">
 
-<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
-
 <style>
   /* Mise en page : une seule colonne sous un ciel de nuit — citrouilles et fantôme posés sur le rouleau, logo éclairé par la lune */
   :root {
@@ -436,11 +434,46 @@
     .tombe { width: 70px; }
   }
 
+  /* Annonce du défi : éclair, flash et rouleau qui tremble */
+  .calque-orage {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 100;
+    pointer-events: none;
+  }
+  .flash {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+    pointer-events: none;
+    background: radial-gradient(circle at 50% 30%, rgba(246, 237, 207, 0.95), rgba(201, 184, 224, 0.75) 60%, rgba(155, 111, 208, 0.55));
+    opacity: 0;
+  }
+  .flash.actif { animation: flash 0.75s ease-out; }
+  @keyframes flash {
+    0%   { opacity: 0; }
+    6%   { opacity: 0.9; }
+    16%  { opacity: 0.1; }
+    26%  { opacity: 0.65; }
+    100% { opacity: 0; }
+  }
+  .card.stopped.secousse { animation: secousse 0.45s ease-out; }
+  @keyframes secousse {
+    0%, 100% { translate: 0 0; }
+    15% { translate: -6px 2px; }
+    30% { translate: 5px -2px; }
+    45% { translate: -4px 1px; }
+    60% { translate: 3px 0; }
+    80% { translate: -1px 0; }
+  }
+
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; animation: none !important; }
-    .follets, .sorciere, .chauve { display: none; }
+    .follets, .sorciere, .chauve, .calque-orage, .flash { display: none; }
   }
 </style>
 
@@ -803,6 +836,35 @@
   const MESSAGE_FIN = "Flash le QR code pour continuer";
   let tires = 0;
 
+  // ---- Compteur gardé sur le téléphone ----
+  // Rafraîchir la page (ou revenir en arrière) reprend le compteur : la page reste bloquée.
+  // Seule une nouvelle ouverture de la page (scan du QR code) remet le compteur à zéro.
+  const CLE_SESSION = CLE + '-compteur';
+
+  function typeOuverture() {
+    try {
+      const n = performance.getEntriesByType('navigation')[0];
+      if (n && n.type) return n.type;
+    } catch (e) {}
+    try {
+      const t = performance.navigation.type;
+      return t === 1 ? 'reload' : t === 2 ? 'back_forward' : 'navigate';
+    } catch (e) {}
+    return 'navigate';
+  }
+
+  function sauverCompteur() {
+    try { localStorage.setItem(CLE_SESSION, JSON.stringify({ tires })); } catch (e) {}
+  }
+
+  if (typeOuverture() !== 'navigate') {
+    try {
+      const s = JSON.parse(localStorage.getItem(CLE_SESSION));
+      if (s && Number.isInteger(s.tires)) tires = Math.max(0, s.tires);
+    } catch (e) {}
+  }
+  sauverCompteur();
+
   const card = document.getElementById('card');
   const tambour = document.getElementById('tambour');
   const annonce = document.getElementById('annonce');
@@ -943,36 +1005,160 @@
     });
   }
 
-  // Confettis dessinés sur notre propre calque, sans « worker » (évite l'avertissement de l'aperçu Claude)
-  let tir = null;
-  if (typeof confetti === 'function' && confetti.create) {
-    const calque = document.createElement('canvas');
-    calque.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:100';
-    document.body.appendChild(calque);
-    tir = confetti.create(calque, { resize: true, useWorker: false });
+  // ---- Annonce du défi : coup d'éclair, puis une nuée de chauves-souris s'échappe du rouleau ----
+  const calque = document.createElement('canvas');
+  calque.className = 'calque-orage';
+  calque.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(calque);
+  const ctx = calque.getContext('2d');
+  const flash = document.createElement('div');
+  flash.className = 'flash';
+  flash.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(flash);
+
+  let chauves = [];
+  let eclair = null;          // { points, fin }
+  let boucleOrage = null;
+
+  function caler() {
+    const r = window.devicePixelRatio || 1;
+    calque.width = Math.round(innerWidth * r);
+    calque.height = Math.round(innerHeight * r);
+    ctx.setTransform(r, 0, 0, r, 0, 0);
+  }
+  caler();
+  window.addEventListener('resize', caler);
+
+  // Éclair en zigzag, du haut de l'écran jusqu'au rouleau
+  function tracerEclair(xDepart, yFin) {
+    const pts = [[xDepart, -10]];
+    let x = xDepart, y = -10;
+    while (y < yFin) {
+      y += 18 + Math.random() * 26;
+      x += (Math.random() - 0.5) * 46;
+      pts.push([x, Math.min(y, yFin)]);
+    }
+    return pts;
   }
 
-  const confettiColors = ['#f07c1b', '#ff9a3c', '#6b3fa0', '#9b6fd0', '#7fd36b', '#f6edcf', '#0d0712'];
-  let formesFete = null;
-  try {
-    if (typeof confetti === 'function' && confetti.shapeFromText) {
-      formesFete = ['🎃', '🦇', '👻'].map(t => confetti.shapeFromText({ text: t, scalar: 2 }));
-    }
-  } catch (e) { formesFete = null; }
+  function dessinerEclair(pts, epaisseur, couleur) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (const p of pts) ctx.lineTo(p[0], p[1]);
+    ctx.lineWidth = epaisseur;
+    ctx.strokeStyle = couleur;
+    ctx.lineJoin = 'miter';
+    ctx.stroke();
+  }
 
-  function launchConfetti() {
-    if (!tir) return;
-    tir({ particleCount: 180, spread: 100, startVelocity: 45, origin: { y: 0.6 }, colors: confettiColors });
-    tir({ particleCount: 80, spread: 160, startVelocity: 30, scalar: 1.2, origin: { y: 0.6 }, colors: confettiColors });
-    if (formesFete) {
-      tir({ particleCount: 36, spread: 130, startVelocity: 38, scalar: 2, shapes: formesFete, flat: true, origin: { y: 0.6 } });
+  // Une chauve-souris : corps, oreilles, ailes qui battent, yeux orange
+  function dessinerChauve(b, t) {
+    const bat = Math.sin(t * b.vitesseAile + b.phase);   // -1..1
+    const ouv = 0.25 + 0.75 * Math.abs(bat);             // ouverture des ailes
+    const s = b.taille;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.angle);
+    ctx.globalAlpha = b.alpha;
+    ctx.fillStyle = '#0d0712';
+    ctx.strokeStyle = '#9b6fd0';
+    ctx.lineWidth = 1;
+    for (const cote of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(0, -0.05 * s);
+      ctx.quadraticCurveTo(cote * 0.3 * s, -0.55 * s * ouv, cote * 1.0 * s, -0.35 * s * ouv);
+      ctx.quadraticCurveTo(cote * 0.8 * s, -0.05 * s, cote * 0.85 * s, 0.12 * s);
+      ctx.quadraticCurveTo(cote * 0.62 * s, 0.0, cote * 0.55 * s, 0.2 * s);
+      ctx.quadraticCurveTo(cote * 0.38 * s, 0.05 * s, cote * 0.28 * s, 0.24 * s);
+      ctx.quadraticCurveTo(cote * 0.16 * s, 0.1 * s, 0, 0.18 * s);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
     }
-    const end = Date.now() + 2000;
-    (function frame() {
-      tir({ particleCount: 6, angle: 60, spread: 60, origin: { x: 0, y: 0.7 }, colors: confettiColors });
-      tir({ particleCount: 6, angle: 120, spread: 60, origin: { x: 1, y: 0.7 }, colors: confettiColors });
-      if (Date.now() < end) requestAnimationFrame(frame);
-    })();
+    ctx.beginPath();
+    ctx.ellipse(0, 0.05 * s, 0.13 * s, 0.2 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-0.11 * s, -0.08 * s); ctx.lineTo(-0.08 * s, -0.24 * s); ctx.lineTo(-0.02 * s, -0.1 * s);
+    ctx.moveTo(0.11 * s, -0.08 * s);  ctx.lineTo(0.08 * s, -0.24 * s);  ctx.lineTo(0.02 * s, -0.1 * s);
+    ctx.fill();
+    ctx.fillStyle = '#ff9a3c';
+    ctx.beginPath(); ctx.arc(-0.05 * s, -0.02 * s, 0.028 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0.05 * s, -0.02 * s, 0.028 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function animerOrage(t) {
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    if (eclair && t < eclair.fin) {
+      const vie = (eclair.fin - t) / 380;
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, vie * 1.6);
+      ctx.shadowColor = '#c9b8e0';
+      ctx.shadowBlur = 18;
+      dessinerEclair(eclair.points, 6, 'rgba(201, 184, 224, 0.55)');
+      ctx.shadowBlur = 0;
+      dessinerEclair(eclair.points, 2.2, '#ffffff');
+      ctx.restore();
+    }
+    const dt = 1 / 60;
+    chauves = chauves.filter(b => {
+      const age = (t - b.ne) / 1000;
+      if (age < 0) return true;
+      b.vx += b.ax * dt;
+      b.vy += b.ay * dt;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt + Math.sin(age * 9 + b.phase) * 0.9;
+      b.angle = Math.atan2(b.vy, b.vx) * 0.15;
+      b.alpha = Math.min(1, age * 6) * Math.max(0, 1 - Math.max(0, age - 1.6) / 0.8);
+      dessinerChauve(b, age);
+      return age < 2.4 && b.y > -80 && b.x > -80 && b.x < innerWidth + 80;
+    });
+    if (chauves.length || (eclair && t < eclair.fin)) {
+      boucleOrage = requestAnimationFrame(animerOrage);
+    } else {
+      ctx.clearRect(0, 0, innerWidth, innerHeight);
+      boucleOrage = null;
+    }
+  }
+
+  function orage() {
+    if (reduit) return;
+    const r = card.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const maintenant = performance.now();
+
+    // 1. Éclair et flash, le rouleau tremble
+    eclair = { points: tracerEclair(cx + (Math.random() - 0.5) * r.width * 0.6, r.top + 6), fin: maintenant + 380 };
+    flash.classList.remove('actif');
+    card.classList.remove('secousse');
+    void flash.offsetWidth;
+    flash.classList.add('actif');
+    card.classList.add('secousse');
+    if (navigator.vibrate) navigator.vibrate([40, 60, 120]);
+
+    // 2. Les chauves-souris jaillissent du rouleau, par vagues
+    for (let i = 0; i < 26; i++) {
+      const dir = Math.random() < 0.5 ? -1 : 1;
+      const vitesse = 160 + Math.random() * 220;
+      const ang = -Math.PI / 2 + dir * (0.25 + Math.random() * 1.0);
+      chauves.push({
+        ne: maintenant + 140 + i * 22,
+        x: cx + (Math.random() - 0.5) * r.width * 0.7,
+        y: cy + (Math.random() - 0.5) * r.height * 0.4,
+        vx: Math.cos(ang) * vitesse,
+        vy: Math.sin(ang) * vitesse,
+        ax: dir * (40 + Math.random() * 80),
+        ay: -120 - Math.random() * 120,
+        taille: 18 + Math.random() * 24,
+        vitesseAile: 20 + Math.random() * 10,
+        phase: Math.random() * 6.28,
+        angle: 0,
+        alpha: 0
+      });
+    }
+    if (!boucleOrage) boucleOrage = requestAnimationFrame(animerOrage);
   }
 
   async function toggleLoop() {
@@ -987,6 +1173,7 @@
       const defi = piocherDefi();
       await freiner(defi);
       tires++;
+      sauverCompteur();
       etat = 'repos';
       cible = null;
       dessiner();
@@ -996,17 +1183,13 @@
       btn.classList.remove('ralentit', 'running');
       btn.textContent = "Recommencer";
       if (navigator.vibrate) navigator.vibrate(60);
-      launchConfetti();
+      orage();
       return;
     }
 
     // Limite atteinte : le message remplace le défi et le bouton se bloque
     if (tires >= MAX_DEFIS) {
-      card.classList.remove('stopped', 'placeholder');
-      card.classList.add('limit');
-      texteDevant(MESSAGE_FIN);
-      annonce.textContent = MESSAGE_FIN;
-      btn.disabled = true;
+      afficherLimite();
       return;
     }
 
@@ -1019,7 +1202,18 @@
     requestAnimationFrame(tourner);
   }
 
+  function afficherLimite() {
+    card.classList.remove('stopped', 'placeholder');
+    card.classList.add('limit');
+    texteDevant(MESSAGE_FIN);
+    annonce.textContent = MESSAGE_FIN;
+    btn.disabled = true;
+  }
+
   btn.addEventListener('click', toggleLoop);
+
+  // Page rafraîchie après les 5 défis : on reste bloqué sur le message QR code
+  if (tires >= MAX_DEFIS) afficherLimite();
 </script>
 
 </html>
